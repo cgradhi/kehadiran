@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sistem Kehadiran Pengecam Wajah</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:#f4f6f8;color:#1b1f23}
+header{background:#1d4ed8;color:#fff;padding:14px 16px;font-weight:600}
+nav{display:flex;background:#fff;border-bottom:1px solid #ddd}
+nav button{flex:1;padding:12px 4px;border:0;background:none;font-size:14px;cursor:pointer}
+nav button.on{border-bottom:3px solid #1d4ed8;color:#1d4ed8;font-weight:600}
+main{max-width:640px;margin:auto;padding:14px}
+.box{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:4/3}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#sw{position:absolute;top:8px;right:8px;z-index:5;width:44px;height:44px;border-radius:50%;border:0;background:#fff9;font-size:22px;cursor:pointer}
+input,button.p{width:100%;padding:12px;margin-top:10px;font-size:16px;border-radius:8px;border:1px solid #bbb}
+button.p{background:#1d4ed8;color:#fff;border:0;cursor:pointer}
+button.d{background:#dc2626}
+table{width:100%;border-collapse:collapse;background:#fff;margin-top:10px;font-size:14px}
+td,th{padding:8px;border-bottom:1px solid #eee;text-align:left}
+#msg{margin-top:10px;padding:10px;border-radius:8px;background:#e0e7ff;min-height:40px}
+.hide{display:none}
+li{margin:6px 0}
+pre{background:#fff;border:1px solid #ddd;padding:10px;overflow:auto;font-size:12px;max-height:240px}
+small{color:#555}
+</style>
+</head>
+<body>
+<header>📷 Sistem Kehadiran Pengecam Wajah</header>
+<nav>
+  <button id="t1" class="on" onclick="tab(1)">Kehadiran</button>
+  <button id="t2" onclick="tab(2)">Daftar</button>
+  <button id="t3" onclick="tab(3)">Rekod</button>
+  <button id="t4" onclick="tab(4)">Tetapan</button>
+</nav>
+<main>
+  <div id="cam">
+    <div class="box"><video id="v" autoplay muted playsinline></video><canvas id="c"></canvas>
+      <button id="sw" onclick="tukarKamera()" title="Tukar kamera">🔄</button></div>
+    <div id="msg">Memuatkan model AI…</div>
+  </div>
+
+  <div id="p2" class="hide">
+    <input id="nama" placeholder="Nama pelajar / pekerja">
+    <button class="p" onclick="daftar()">Tangkap wajah & simpan</button>
+    <p><small>Hadap kamera dengan jelas. Sistem ambil 5 sampel.</small></p>
+    <ul id="senarai"></ul>
+  </div>
+
+  <div id="p3" class="hide">
+    <button class="p" onclick="syncLogs()">🔄 Segerak dari Google Sheet</button>
+    <button class="p" onclick="eksport()">⬇ Muat turun CSV</button>
+    <table><thead><tr><th>Nama</th><th>Tarikh</th><th>Masa</th></tr></thead><tbody id="log"></tbody></table>
+    <button class="p d" onclick="padam()">Padam rekod (peranti ini)</button>
+  </div>
+
+  <div id="p4" class="hide">
+    <h3>Sambung Google Sheet</h3>
+    <ol>
+      <li>Buka Google Sheet baru → <b>Extensions → Apps Script</b>.</li>
+      <li>Padam kod sedia ada, tampal kod di bawah, tekan Save.</li>
+      <li><b>Deploy → New deployment → Web app</b>. Execute as: <b>Me</b>, Who has access: <b>Anyone</b>. Deploy & benarkan kebenaran.</li>
+      <li>Salin URL Web app (berakhir <code>/exec</code>) ke bawah.</li>
+    </ol>
+    <pre id="kod"></pre>
+    <input id="url" placeholder="https://script.google.com/macros/s/.../exec">
+    <button class="p" onclick="simpanUrl()">Simpan & segerak</button>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js"></script>
+<script>
+const MODEL='https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
+const $=id=>document.getElementById(id);
+const rd=(k)=>{try{return JSON.parse(localStorage.getItem(k))||[]}catch(e){return[]}};
+const wr=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+let users=rd('fa_users'), logs=rd('fa_logs'), matcher=null, busy=false, ready=false, mode=1, facing='user';
+let url=localStorage.getItem('fa_url')||'';
+const opt=()=>new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:.5});
+const say=t=>$('msg').textContent=t;
+
+const APPS_SCRIPT=`function sh(n){
+  var ss=SpreadsheetApp.getActive(),s=ss.getSheetByName(n);
+  if(!s){s=ss.insertSheet(n);
+    if(n=='Kehadiran'){s.appendRow(['Nama','Tarikh','Masa']);s.getRange('A:C').setNumberFormat('@')}}
+  return s}
+function doPost(e){
+  var d=JSON.parse(e.postData.contents);
+  if(d.action=='addLog')sh('Kehadiran').appendRow([d.nama,d.tarikh,d.masa]);
+  if(d.action=='addUser')sh('Users').appendRow([d.nama,JSON.stringify(d.d)]);
+  if(d.action=='delUser'){var s=sh('Users'),v=s.getDataRange().getValues();
+    for(var i=v.length-1;i>=0;i--)if(v[i][0]==d.nama)s.deleteRow(i+1)}
+  return ContentService.createTextOutput('ok')}
+function doGet(e){
+  var u=e.parameter.action=='users',v=sh(u?'Users':'Kehadiran').getDataRange().getValues(),out;
+  if(u)out=v.filter(function(r){return r[0]}).map(function(r){return{name:r[0],d:JSON.parse(r[1])}});
+  else out=v.filter(function(r){return r[0]&&r[0]!='Nama'}).map(function(r){return{nama:r[0],tarikh:String(r[1]),masa:String(r[2])}});
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON)}`;
+$('kod').textContent=APPS_SCRIPT; $('url').value=url;
+
+function tab(n){
+  mode=n;
+  [1,2,3,4].forEach(i=>{$('t'+i).classList.toggle('on',i==n);});
+  $('cam').classList.toggle('hide',n>2);
+  $('p2').classList.toggle('hide',n!=2);
+  $('p3').classList.toggle('hide',n!=3);
+  $('p4').classList.toggle('hide',n!=4);
+  $('msg').classList.toggle('hide',n!=1);
+  if(n==3)papar(); if(n==2)senarai();
+}
+function build(){
+  matcher=users.length?new faceapi.FaceMatcher(users.map(u=>new faceapi.LabeledFaceDescriptors(u.name,u.d.map(a=>new Float32Array(a)))),0.5):null;
+}
+async function startCam(){
+  const v=$('v');
+  if(v.srcObject)v.srcObject.getTracks().forEach(t=>t.stop());
+  const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facing}}});
+  v.srcObject=s;
+  await new Promise(r=>v.onloadedmetadata=r);
+}
+async function tukarKamera(){
+  facing=facing==='user'?'environment':'user';
+  busy=true;
+  try{await startCam();say(facing==='user'?'Kamera depan':'Kamera belakang')}
+  catch(e){facing=facing==='user'?'environment':'user';say('Tidak dapat tukar kamera: '+e.message)}
+  busy=false;
+}
+async function init(){
+  try{
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL),
+      faceapi.nets.faceRecognitionNet.loadFromUri(MODEL)]);
+    await startCam();
+    ready=true;
+    if(url)await syncUsers();
+    build();
+    say(users.length?'Sedia. Hadap kamera untuk tandakan kehadiran.':'Belum ada pengguna. Pergi ke tab Daftar.');
+    loop();
+  }catch(e){say('Ralat: '+e.message+' (perlu internet & kebenaran kamera)')}
+}
+const today=()=>new Date().toLocaleDateString('en-CA');
+async function loop(){
+  if(ready&&!busy&&mode==1){
+    busy=true;
+    const v=$('v'),c=$('c');
+    c.width=v.videoWidth;c.height=v.videoHeight;
+    const g=c.getContext('2d');g.clearRect(0,0,c.width,c.height);
+    const all=await faceapi.detectAllFaces(v,opt()).withFaceLandmarks().withFaceDescriptors();
+    for(const f of all){
+      let nama='Tidak dikenali';
+      if(matcher){const m=matcher.findBestMatch(f.descriptor);if(m.label!=='unknown')nama=m.label}
+      const b=f.detection.box,ok=nama!=='Tidak dikenali';
+      g.strokeStyle=ok?'#22c55e':'#ef4444';g.lineWidth=3;g.strokeRect(b.x,b.y,b.width,b.height);
+      g.fillStyle=g.strokeStyle;g.fillRect(b.x,b.y-24,Math.max(b.width,120),24);
+      g.fillStyle='#fff';g.font='16px sans-serif';g.fillText(nama,b.x+4,b.y-7);
+      if(ok)tanda(nama);
+    }
+    busy=false;
+  }
+  setTimeout(loop,500);
+}
+function post(o){
+  if(!url)return;
+  fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain'},body:JSON.stringify(o)}).catch(()=>{});
+}
+function tanda(nama){
+  const d=today();
+  if(logs.some(l=>l.nama===nama&&l.tarikh===d)){say('✔ '+nama+' sudah direkod hari ini.');return}
+  const t=new Date().toLocaleTimeString('en-GB'),r={nama,tarikh:d,masa:t};
+  logs.push(r);wr('fa_logs',logs);post({action:'addLog',...r});
+  say('✅ Kehadiran direkod: '+nama+' ('+t+')');
+}
+async function daftar(){
+  const nama=$('nama').value.trim();
+  if(!nama)return alert('Sila masukkan nama');
+  if(!ready)return alert('Kamera belum sedia');
+  if(users.some(u=>u.name===nama))return alert('Nama sudah wujud');
+  busy=true;const d=[];
+  for(let i=0;i<5;i++){
+    const r=await faceapi.detectSingleFace($('v'),opt()).withFaceLandmarks().withFaceDescriptor();
+    if(r)d.push(Array.from(r.descriptor));
+    await new Promise(r=>setTimeout(r,400));
+  }
+  busy=false;
+  if(d.length<3)return alert('Wajah tidak dikesan dengan jelas. Cuba lagi.');
+  users.push({name:nama,d});wr('fa_users',users);build();
+  post({action:'addUser',nama,d});
+  $('nama').value='';senarai();alert(nama+' berjaya didaftar.');
+}
+function senarai(){
+  $('senarai').innerHTML=users.map((u,i)=>`<li>${u.name} <a href="#" onclick="buang(${i});return false">[buang]</a></li>`).join('')||'<li>Tiada pengguna.</li>';
+}
+function buang(i){
+  const n=users[i].name;users.splice(i,1);wr('fa_users',users);build();
+  post({action:'delUser',nama:n});senarai();
+}
+async function syncUsers(){
+  try{
+    const r=await fetch(url+'?action=users');users=await r.json();wr('fa_users',users);build();senarai();return true;
+  }catch(e){say('Gagal segerak pengguna: '+e.message);return false}
+}
+async function syncLogs(){
+  if(!url)return alert('Sambung Google Sheet di tab Tetapan dahulu');
+  try{
+    const r=await fetch(url+'?action=logs');logs=await r.json();wr('fa_logs',logs);papar();
+  }catch(e){alert('Gagal segerak: '+e.message)}
+}
+async function simpanUrl(){
+  url=$('url').value.trim();localStorage.setItem('fa_url',url);
+  if(!url)return alert('URL dikosongkan');
+  if(await syncUsers()){await syncLogs();alert('Berjaya disambung. '+users.length+' pengguna dimuat turun.');}
+  else alert('Gagal. Semak URL & pastikan akses "Anyone".');
+}
+function papar(){
+  $('log').innerHTML=[...logs].reverse().map(l=>`<tr><td>${l.nama}</td><td>${l.tarikh}</td><td>${l.masa}</td></tr>`).join('');
+}
+function eksport(){
+  const csv='Nama,Tarikh,Masa\n'+logs.map(l=>`"${l.nama}",${l.tarikh},${l.masa}`).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download='kehadiran.csv';a.click();
+}
+function padam(){if(confirm('Padam rekod pada peranti ini? (Google Sheet tidak terjejas)')){logs=[];wr('fa_logs',logs);papar()}}
+init();
+</script>
+</body>
+</html>
